@@ -1,0 +1,7 @@
+Battle.net.exe
+Agent.exe
+steam.exe
+Launcher.exe
+bootstrapper.exe
+EADesktop.exe
+explorer.exe
