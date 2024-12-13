@@ -1,9 +1,6 @@
 use std::{
-    collections::HashSet,
-    ffi::{OsStr, OsString},
-    io::BufRead,
-    mem::MaybeUninit,
-    os::{raw::c_void, windows::ffi::OsStringExt},
+    collections::HashSet, ffi::OsString, io::BufRead, mem::MaybeUninit,
+    os::windows::ffi::OsStringExt,
 };
 use windows::{
     core::PCWSTR,
@@ -44,21 +41,40 @@ fn get_process_information(handle: HANDLE) -> Result<PROCESS_BASIC_INFORMATION, 
 }
 
 fn get_process_name(handle: HANDLE) -> Result<String, std::io::Error> {
-    let mut process_name: [u8; 256] = [0; 256];
+    let mut process_name: [u8; 260] = [0; 260];
     let len = unsafe { GetProcessImageFileNameA(handle, &mut process_name) };
     if len == 0 {
         return Err(std::io::Error::last_os_error());
     }
 
-    let process_name_unfiltered = String::from_utf8_lossy(&process_name);
-    let process_name = match process_name_unfiltered.split("\\").last() {
-        Some(name) => name,
-        None => &process_name_unfiltered,
+    let string = std::str::from_utf8(&process_name[..len as usize])
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+
+    let c_str_process_name = std::ffi::CString::new(string);
+    let c_str_process_name = match c_str_process_name {
+        Ok(c_str_process_name) => c_str_process_name,
+        Err(_) => {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+        }
     };
 
-    Ok(process_name.to_string())
+    let process_name_unfiltered = c_str_process_name.to_str();
+    let process_name_unfiltered = match process_name_unfiltered {
+        Ok(process_name_unfiltered) => process_name_unfiltered,
+        Err(_) => {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
+        }
+    };
+
+    let process_name = match process_name_unfiltered.rsplit_once("\\") {
+        Some((_, name)) => name.to_string(),
+        None => process_name_unfiltered.to_owned(),
+    };
+
+    Ok(process_name)
 }
 
+// taken from sysinfo crate, (which was taken from processhacker(which is now called systeminformer))
 unsafe fn ph_query_process_variable_size(
     process_handle: HANDLE,
     process_information_class: PROCESSINFOCLASS,
@@ -68,7 +84,7 @@ unsafe fn ph_query_process_variable_size(
     if let Err(err) = NtQueryInformationProcess(
         process_handle,
         process_information_class as _,
-        0 as *mut _,
+        std::ptr::null_mut(),
         0,
         return_length.as_mut_ptr() as *mut _,
     )
@@ -137,7 +153,11 @@ fn get_process_cmd_line(handle: HANDLE) -> Vec<OsString> {
     }
 }
 
-fn is_parent_process_whitelisted(child_pid: usize, parent_whitelist: &HashSet<String>) -> bool {
+fn is_parent_process_whitelisted(
+    child_pid: usize,
+    parent_whitelist: &HashSet<String>,
+    direct_whitelist: &HashSet<String>,
+) -> bool {
     let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, child_pid as u32) };
     if let Err(e) = handle {
         eprintln!("OpenProcess failed: {:?}", e);
@@ -146,9 +166,11 @@ fn is_parent_process_whitelisted(child_pid: usize, parent_whitelist: &HashSet<St
 
     if let Ok(handle) = handle {
         let process_name = get_process_name(handle).unwrap_or_else(|_| "unknown".to_string());
-
-        println!("Parent process name: {process_name}");
         if parent_whitelist.contains(&process_name) {
+            return true;
+        }
+
+        if direct_whitelist.contains(&process_name) {
             return true;
         }
     }
@@ -178,6 +200,13 @@ fn fill_parent_whitelist(parent_whitelist: &mut HashSet<String>) -> Result<(), s
     Ok(())
 }
 
+fn set_priority(handle: HANDLE, priority: PROCESS_CREATION_FLAGS) {
+    let result = unsafe { SetPriorityClass(handle, priority) };
+    if let Err(e) = result {
+        eprintln!("SetPriorityClass failed: {e}");
+    }
+}
+
 fn limit_processes(direct_whitelist: &HashSet<String>, parent_whitelist: &HashSet<String>) {
     let mut pids: [u32; 1024] = [0; 1024];
     let mut bytes_returned: u32 = 0;
@@ -193,8 +222,8 @@ fn limit_processes(direct_whitelist: &HashSet<String>, parent_whitelist: &HashSe
         return;
     }
 
-    let filtered_pids = pids.into_iter().filter(|pid| *pid != 0);
-    for pid in filtered_pids {
+    let pids = pids.into_iter().filter(|pid| *pid != 0);
+    for pid in pids {
         let handle = unsafe {
             OpenProcess(
                 PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
@@ -203,56 +232,56 @@ fn limit_processes(direct_whitelist: &HashSet<String>, parent_whitelist: &HashSe
             )
         };
 
-        if let Err(e) = handle {
-            eprintln!("OpenProcess failed: {:?}", e);
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(e) => {
+                eprintln!("OpenProcess failed: {:?}", e);
+                continue;
+            }
+        };
+
+        let process_name = get_process_name(handle).unwrap_or_else(|_| String::from(""));
+        if direct_whitelist.contains(&process_name) {
+            set_priority(handle, ABOVE_NORMAL_PRIORITY_CLASS);
             continue;
         }
 
-        if let Ok(handle) = handle {
-            let process_name = get_process_name(handle).unwrap_or_else(|_| "unknown".to_string());
-            if direct_whitelist.contains(&process_name) {
+        let result = get_process_information(handle);
+        let process_information = match result {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("NtQueryInformationProcess failed: {:?}", e);
                 continue;
             }
+        };
 
-            let result = get_process_information(handle);
-            let process_information = match result {
-                Ok(info) => info,
-                Err(e) => {
-                    eprintln!("NtQueryInformationProcess failed: {:?}", e);
-                    continue;
-                }
-            };
-
-            // print current processname
-            println!("Current process name: {process_name}");
-            if is_parent_process_whitelisted(
-                process_information.InheritedFromUniqueProcessId,
-                parent_whitelist,
-            ) {
-                continue;
-            }
-
-            // skip first arg
-            let cmdline = get_process_cmd_line(handle)
-                .into_iter()
-                .skip(1)
-                .collect::<Vec<_>>();
-
-            // ignore if it has -steam
-            if cmdline
-                .iter()
-                .any(|arg| arg.to_string_lossy().contains("-steam"))
-            {
-                continue;
-            }
-
-            let result = unsafe { SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS) };
-            if let Err(e) = result {
-                eprintln!("SetPriorityClass failed: {e} for {process_name}");
-            } else {
-                println!("Set priority of {process_name} to below normal");
-            }
+        if is_parent_process_whitelisted(
+            process_information.InheritedFromUniqueProcessId,
+            parent_whitelist,
+            direct_whitelist,
+        ) {
+            continue;
         }
+
+        // skip first arg
+        let cmdline = get_process_cmd_line(handle)
+            .into_iter()
+            .skip(1)
+            .collect::<Vec<_>>();
+
+        // battlenet, steam, epic
+        let ignore_args = ["-uid", "-steam", "-epicapp"];
+
+        // ignore certain command line arguments
+        if cmdline
+            .iter()
+            .any(|arg| ignore_args.contains(&arg.to_str().unwrap()))
+        {
+            set_priority(handle, HIGH_PRIORITY_CLASS);
+            continue;
+        }
+
+        set_priority(handle, BELOW_NORMAL_PRIORITY_CLASS);
     }
 }
 
@@ -273,8 +302,5 @@ fn main() {
         return;
     }
 
-    loop {
-        limit_processes(&direct_whitelist, &parent_whitelist);
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    }
+    limit_processes(&direct_whitelist, &parent_whitelist);
 }
