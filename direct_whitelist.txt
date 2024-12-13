@@ -1,0 +1,11 @@
+dwm.exe
+csrss.exe
+wininit.exe
+winlogon.exe
+explorer.exe
+Battle.net.exe
+Agent.exe
+steam.exe
+Launcher.exe
+bootstrapper.exe
+EADesktop.exe
