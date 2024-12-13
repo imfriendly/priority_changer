@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet, ffi::OsString, io::BufRead, mem::MaybeUninit,
+    collections::HashSet, ffi::OsString, io::BufRead, mem, mem::MaybeUninit,
     os::windows::ffi::OsStringExt,
 };
 use windows::{
@@ -217,7 +217,7 @@ fn limit_processes(direct_whitelist: &HashSet<String>, parent_whitelist: &HashSe
         return;
     }
 
-    if bytes_returned as usize / 4 > pids.len() {
+    if bytes_returned as usize / mem::size_of::<u32>() > pids.len() {
         eprintln!("EnumProcesses failed: buffer too small");
         return;
     }
@@ -240,7 +240,7 @@ fn limit_processes(direct_whitelist: &HashSet<String>, parent_whitelist: &HashSe
             }
         };
 
-        let process_name = get_process_name(handle).unwrap_or_else(|_| String::from(""));
+        let process_name = get_process_name(handle).unwrap_or_else(|_| String::new());
         if direct_whitelist.contains(&process_name) {
             set_priority(handle, ABOVE_NORMAL_PRIORITY_CLASS);
             continue;
