@@ -1,5 +1,5 @@
 [package]
-name = "affinity_change"
+name = "priority_change"
 version = "0.1.0"
 edition = "2021"
 

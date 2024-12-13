@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "affinity_change"
+name = "priority_change"
 version = "0.1.0"
 dependencies = [
  "windows",
