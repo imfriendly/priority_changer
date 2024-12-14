@@ -13,15 +13,7 @@ use windows::{
 };
 
 fn get_process_information(handle: HANDLE) -> Result<PROCESS_BASIC_INFORMATION, std::io::Error> {
-    let mut process_information: PROCESS_BASIC_INFORMATION = PROCESS_BASIC_INFORMATION {
-        ExitStatus: NTSTATUS(0),
-        PebBaseAddress: std::ptr::null_mut(),
-        AffinityMask: 0,
-        BasePriority: 0,
-        UniqueProcessId: 0,
-        InheritedFromUniqueProcessId: 0,
-    };
-
+    let mut process_information = PROCESS_BASIC_INFORMATION::default();
     let mut return_length: u32 = 0;
     let result = unsafe {
         NtQueryInformationProcess(
